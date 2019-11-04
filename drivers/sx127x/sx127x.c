@@ -85,7 +85,8 @@ int sx127x_reset(const sx127x_t *dev)
     gpio_clear(dev->params.reset_pin);
 
     /* Wait 1 ms */
-    xtimer_spin(xtimer_ticks_from_usec(1000));
+    /* xtimer_spin(xtimer_ticks_from_usec(1000)); */
+    lptimer_sleep(1);
 
     /* Put reset pin in High-Z */
     gpio_init(dev->params.reset_pin, GPIO_IN);
@@ -111,19 +112,16 @@ int sx127x_init(sx127x_t *dev)
     }
 
     _init_timers(dev);
-    xtimer_spin(xtimer_ticks_from_usec(1000)); /* wait 1 millisecond */
-
+    /* wait 1 millisecond */
+    /* xtimer_spin(xtimer_ticks_from_usec(1000)); */
+    lptimer_sleep(1);
     sx127x_reset(dev);
-
     if (dev->_internal.modem_chip == SX127X_MODEM_SX1276) {
         sx1276_rx_chain_calibration(dev);
     }
-    
     sx127x_set_op_mode(dev, SX127X_RF_OPMODE_SLEEP);
-
     /* do not check return code as GPIO_UNDEF will produce an error */
     _init_gpios(dev);
-    
     return SX127X_INIT_OK;
 }
 
@@ -168,7 +166,9 @@ uint32_t sx127x_random(sx127x_t *dev)
     sx127x_set_op_mode(dev, SX127X_RF_OPMODE_RECEIVER);
 
     for (unsigned i = 0; i < 32; i++) {
-        xtimer_spin(xtimer_ticks_from_usec(1000)); /* wait for the chaos */
+        /* wait for the chaos */
+        /* xtimer_spin(xtimer_ticks_from_usec(1000)); */
+        lptimer_sleep(1);
 
         /* Non-filtered RSSI value reading. Only takes the LSB value */
         rnd |= ((uint32_t) sx127x_reg_read(dev, SX127X_REG_LR_RSSIWIDEBAND) & 0x01) << i;
@@ -185,7 +185,7 @@ uint32_t sx127x_random(sx127x_t *dev)
 void sx127x_isr(netdev_t *dev)
 {
     if (dev->event_callback) {
-        dev->event_callback(dev, NETDEV_EVENT_ISR, dev->event_callback_arg);
+        dev->event_callback(dev, NETDEV_EVENT_ISR);
     }
 }
 
@@ -281,14 +281,14 @@ static void _on_tx_timeout(void *arg)
 {
     netdev_t *dev = (netdev_t *) arg;
 
-    dev->event_callback(dev, NETDEV_EVENT_TX_TIMEOUT, dev->event_callback_arg);
+    dev->event_callback(dev, NETDEV_EVENT_TX_TIMEOUT);
 }
 
 static void _on_rx_timeout(void *arg)
 {
     netdev_t *dev = (netdev_t *) arg;
 
-    dev->event_callback(dev, NETDEV_EVENT_RX_TIMEOUT, dev->event_callback_arg);
+    dev->event_callback(dev, NETDEV_EVENT_RX_TIMEOUT);
 }
 
 static void _init_timers(sx127x_t *dev)

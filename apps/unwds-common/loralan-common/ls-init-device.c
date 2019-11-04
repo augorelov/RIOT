@@ -60,7 +60,6 @@ extern "C" {
 #include "ls-settings.h"
 #include "ls-config.h"
 #include "ls-init-device.h"
-#include "ls-mac.h"
 
 #define ENABLE_DEBUG    0
 #include "debug.h"
@@ -214,6 +213,10 @@ static shell_command_t shell_commands_common[3] = {
 
 static void init_common(shell_command_t *commands) {
     puts("[device] Initializing...");
+    
+    /* somehow auto_init doesn't work, at least on nRF52, so init xtimer here */
+    xtimer_init();
+    
     memcpy(commands, shell_commands_common, sizeof(shell_commands_common));
     init_normal(commands);
 }

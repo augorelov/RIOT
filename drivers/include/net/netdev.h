@@ -242,7 +242,6 @@ typedef enum {
     NETDEV_EVENT_FHSS_CHANGE_CHANNEL,       /**< channel changed */
     NETDEV_EVENT_CAD_DONE,                  /**< channel activity detection done */
     NETDEV_EVENT_CAD_DETECTED,              /**< channel activity detected */
-    NETDEV_EVENT_VALID_HEADER,              /**< valid header received */
     /* expand this list if needed */
 } netdev_event_t;
 
@@ -266,7 +265,7 @@ typedef struct netdev netdev_t;
  *
  * @param[in] type          type of the event
  */
-typedef void (*netdev_event_cb_t)(netdev_t *dev, netdev_event_t event, void *arg);
+typedef void (*netdev_event_cb_t)(netdev_t *dev, netdev_event_t event);
 
 /**
  * @brief Structure to hold driver state

@@ -268,8 +268,8 @@ ifneq (,$(filter lis2dh12%,$(USEMODULE)))
   ifneq (,$(filter lis2dh12_i2c,$(USEMODULE)))
     FEATURES_REQUIRED += periph_i2c
     FEATURES_REQUIRED += periph_gpio
-    FEATURES_REQUIRED += lptimer
-    USEMODULE += lptimer
+    FEATURES_REQUIRED += xtimer
+    USEMODULE += xtimer
   else
     FEATURES_REQUIRED += periph_gpio
     FEATURES_REQUIRED += periph_spi
@@ -478,6 +478,11 @@ ifneq (,$(filter si70%,$(USEMODULE)))
   USEMODULE += si70xx
 endif
 
+ifneq (,$(filter simcom,$(USEMODULE)))
+  USEMODULE += at
+  USEMODULE += lptimer
+endif
+
 ifneq (,$(filter slipdev,$(USEMODULE)))
   USEMODULE += tsrb
   FEATURES_REQUIRED += periph_uart
@@ -530,6 +535,14 @@ ifneq (,$(filter sx127%,$(USEMODULE)))
   USEMODULE += sx127x
   USEMODULE += netif
   USEMODULE += lora
+endif
+
+ifneq (,$(filter sx128%,$(USEMODULE)))
+  FEATURES_REQUIRED += periph_gpio
+  FEATURES_REQUIRED += periph_gpio_irq
+  FEATURES_REQUIRED += periph_spi
+  USEMODULE += lptimer
+  USEMODULE += sx128x
 endif
 
 ifneq (,$(filter tcs37727,$(USEMODULE)))

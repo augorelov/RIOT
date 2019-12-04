@@ -30,7 +30,7 @@ static lis2dh12_t lis2dh12;
 static lis2dh12_params_t lis2dh12_params;
 
 /* Allocate some of the memory to store the output values of the sensor */
-static lis2dh12_acc_t acc;
+static lis2dh12_data_t acc;
 static int16_t deg_celsius;
 
 int main(void)
@@ -40,7 +40,7 @@ int main(void)
     lis2dh12_params.i2c_dev  = I2C_DEV(0);
     lis2dh12_params.i2c_addr = LIS2DH12_I2C_SAD_L;
     lis2dh12_params.scale    = LIS2DH12_SCALE_2G;
-    lis2dh12_params.rate     = LIS2DH12_RATE_1HZ;
+    lis2dh12_params.odr      = LIS2DH12_ODR_1HZ;
     lis2dh12_params.res      = LIS2DH12_HR_12BIT;
 
     puts("Initializing LIS2DH12 sensor... ");
@@ -54,7 +54,7 @@ int main(void)
     }
 
     while (1) {
-        lis2dh12_power_on(&lis2dh12);
+        lis2dh12_poweron(&lis2dh12);
 
         /* read sensor data */
         if (lis2dh12_read_xyz(&lis2dh12, &acc) == LIS2DH12_OK) {
@@ -73,7 +73,7 @@ int main(void)
             return 1;
         }
 
-        lis2dh12_power_off(&lis2dh12);
+        lis2dh12_poweroff(&lis2dh12);
 
         lptimer_sleep(SLEEP_DELAY_MS);
     }

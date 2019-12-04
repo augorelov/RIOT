@@ -85,6 +85,8 @@ typedef enum {
     NODE_MSG_SEND,
 } node_message_types_t;
 
+bool lorawan_busy = false;
+
 static msg_t msg_join = { .type = NODE_MSG_JOIN };
 static msg_t msg_data = { .type = NODE_MSG_SEND };
 static kernel_pid_t sender_pid;
@@ -101,6 +103,7 @@ static semtech_loramac_t ls;
 static ls_frame_fifo_t  fifo_lorapacket;
 static mutex_t curr_frame_mutex;
 
+static bool lora_joined = false;
 static uint8_t current_join_retries = 0;
 static uint8_t uplinks_failed = 0;
 static uint32_t lora_frm_cnt = 0;
@@ -108,6 +111,8 @@ static uint32_t last_tx_time = 0;
 
 static bool appdata_received(uint8_t *buf, size_t buflen, uint8_t fport);
 static void unwds_callback(module_data_t *buf);
+
+static void ls_setup(semtech_loramac_t *ls);
 
 void radio_init(void)
 {
@@ -162,7 +167,7 @@ static void *sender_thread(void *arg) {
     
     puts("[LoRa] sender thread started");
     
-    last_tx_time = lptimer_now().ticks32;
+    last_tx_time = lptimer_now_msec();
     
     while (1) {
         msg_receive(&msg);
@@ -171,11 +176,11 @@ static void *sender_thread(void *arg) {
         
         /* minimum interval between transmissions */
         uint32_t tx_delay = 0;
-        uint32_t now = lptimer_now().ticks32;
+        uint32_t now = lptimer_now_msec();
 
-        if (last_tx_time + LORAWAN_MIN_TX_DELAY_MS > now) {
+        if ((last_tx_time < now) && (last_tx_time + LORAWAN_MIN_TX_DELAY_MS > now)) {
             tx_delay = last_tx_time + LORAWAN_MIN_TX_DELAY_MS - now;
-            printf("[LoRa] delaying TX by %lu ms\n", tx_delay);
+            printf("[LoRa] delaying TX by %lu ms (now %lu, last %lu)\n", tx_delay, now, last_tx_time);
             lptimer_sleep(tx_delay);
         }
         
@@ -191,6 +196,20 @@ static void *sender_thread(void *arg) {
                 printf("[LoRa] error getting frame from FIFO\n");
                 continue;
             }
+            
+            if (!lora_joined) {
+                puts("[LoRa] packet delayed: not joined");
+                
+                if (current_join_retries == 0) {
+                    puts("[LoRa] attempting to rejoin");
+                    msg_send(&msg_join, sender_pid);
+                } else {
+                    puts("[LoRa] waiting for the node to join");
+                }
+                frame.retransmit = false;
+                ls_frame_fifo_replace(&fifo_lorapacket, &frame);
+                continue;
+            }
 
             if (frame.retransmit) {
                 /* retransmissions should have the same frame counter as original package */
@@ -201,34 +220,45 @@ static void *sender_thread(void *arg) {
                 puts("[LoRa] sending new packet");
             }
             
+            lorawan_busy = true;
+            
             res = semtech_loramac_send(ls, frame.data, frame.length);
+            
+            lorawan_busy = false;
 
             switch (res) {
                 case SEMTECH_LORAMAC_BUSY:
+                    /* weird lock-up condition happens sometimes */
                     puts("[LoRa] MAC already busy");
-                    frame.retransmit = true;
-                    ls_frame_fifo_replace(&fifo_lorapacket, &frame);
+                    
+                    puts("[LoRa] Re-init LoRaMAC stack");
+                    /* save current frame, 'cause FIFO will be initialized too */
+                    ls_frame_fifo_pop(&fifo_lorapacket, &frame);
+                    frame.retransmit = false;
+                    
+                    /* re-init MAC, radio, FIFO */
+                    radio_init();
+                    ls_setup(ls);
+                    
+                    lora_joined = false;
+
+                    /* restore the frame */
+                    ls_frame_fifo_push(&fifo_lorapacket, &frame);
                     break;
                 case SEMTECH_LORAMAC_DUTYCYCLE_RESTRICTED:
                     puts("[LoRa] TX duty cycle restricted");
-                    frame.retransmit = true;
+                    frame.retransmit = false;
                     ls_frame_fifo_replace(&fifo_lorapacket, &frame);
                     break;
                 case SEMTECH_LORAMAC_NO_FREE_CHANNEL:
                     puts("[LoRa] LBT no free channels");
-                    frame.retransmit = true;
+                    frame.retransmit = false;
                     ls_frame_fifo_replace(&fifo_lorapacket, &frame);
                     break;
                 case SEMTECH_LORAMAC_NOT_JOINED: {
                     puts("[LoRa] not joined to the network");
-
-                    if (current_join_retries == 0) {
-                        puts("[LoRa] attempting to rejoin");
-                        msg_send(&msg_join, sender_pid);
-                    } else {
-                        puts("[LoRa] waiting for the node to join");
-                    }
-                    frame.retransmit = true;
+                    lora_joined = false;
+                    frame.retransmit = false;
                     ls_frame_fifo_replace(&fifo_lorapacket, &frame);
                     break;
                 }
@@ -240,21 +270,24 @@ static void *sender_thread(void *arg) {
                     
                     /* remove transmitted frame from FIFO */
                     ls_frame_fifo_pop(&fifo_lorapacket, NULL);
+                    last_tx_time = lptimer_now().ticks32;
                     break;
                 case SEMTECH_LORAMAC_TX_CNF_FAILED:
                     puts("[LoRa] uplink confirmation failed");
                     uplinks_failed++;
                     
                     if (uplinks_failed > unwds_get_node_settings().max_retr) {
-                        puts("[LoRa] too many uplinks failed, rejoining");
+                        lora_joined = false;
                         current_join_retries = 0;
                         uplinks_failed = 0;
                         msg_send(&msg_join, sender_pid);
                         frame.retransmit = false;
+                        puts("[LoRa] too many uplinks failed, rejoining");
                     } else {
                         frame.retransmit = true;
                     }
                     ls_frame_fifo_replace(&fifo_lorapacket, &frame);
+                    last_tx_time = lptimer_now().ticks32;
                     break;
                 default:
                     /* fix if ever happened */
@@ -273,12 +306,19 @@ static void *sender_thread(void *arg) {
         }
         
         if (msg.type == NODE_MSG_JOIN) {
+            lorawan_busy = true;
+            
             res = node_join(ls);
+            
+            lorawan_busy = false;
 
             switch (res) {
             case SEMTECH_LORAMAC_JOIN_SUCCEEDED: {
                 current_join_retries = 0;
+                lora_joined = true;
                 puts("[LoRa] successfully joined to the network");
+                
+                last_tx_time = lptimer_now().ticks32;
                 
                 /* transmitting a packet with module data */
                 module_data_t data = {};
@@ -350,7 +390,6 @@ static void *sender_thread(void *arg) {
                 break;
             }
         }
-        last_tx_time = lptimer_now().ticks32;
     }
     return NULL;
 }
@@ -489,6 +528,9 @@ static void ls_setup(semtech_loramac_t *ls)
     //semtech_loramac_set_netid(ls, 0xAB130C);
 
     semtech_loramac_set_dr(ls, unwds_get_node_settings().dr);
+    
+    semtech_loramac_set_system_max_rx_error(ls, 20);
+    semtech_loramac_set_min_rx_symbols(ls, 6);
     
     semtech_loramac_set_adr(ls, unwds_get_node_settings().adr);
     semtech_loramac_set_class(ls, unwds_get_node_settings().nodeclass);

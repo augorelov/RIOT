@@ -32,8 +32,6 @@
 #define ENABLE_DEBUG        (0)
 #include "debug.h"
 
-#include "log.h"
-
 #if ENABLE_DEBUG
     #define PRINTBUFF _printbuff
     static void _printbuff(uint8_t *buff, unsigned len)
@@ -260,7 +258,7 @@ int lis2dh12_init(lis2dh12_t *dev, const lis2dh12_params_t *params)
     /* Sensor availability check */
     DEBUG("Sensor availability check\n");
     if (_lis2dh12_read_reg(dev, LIS2DH12_WHO_AM_I, &dev_id, 1) < 0) {
-        LOG_ERROR("[LIS2DH12] Sensor is not available\n");
+        DEBUG("[LIS2DH12] Sensor is not available\n");
         return -LIS2DH12_ERROR_I2C;
     }
 
@@ -268,7 +266,7 @@ int lis2dh12_init(lis2dh12_t *dev, const lis2dh12_params_t *params)
     DEBUG("Checking the value of the \"Who am I\" register\n");
     if (dev_id != LIS2DH12_WHO_AM_I_RESPONSE) {
         /* the chip responded incorrectly */
-        LOG_ERROR("[LIS2DH12] Error reading chip ID\n");
+        DEBUG("[LIS2DH12] Error reading chip ID\n");
         return -LIS2DH12_ERROR_NO_DEV;
     }
 
@@ -391,13 +389,13 @@ int lis2dh12_init(lis2dh12_t *dev, const lis2dh12_params_t *params)
     }
 
     /* Set Output Data Rate */
-    DEBUG("Set Output Data Rate [%d]\n", dev->params.rate);
+    DEBUG("Set Output Data Rate [%d]\n", dev->params.odr);
     reg_val = 0x00;
     if (_lis2dh12_read_reg(dev, LIS2DH12_CTRL_REG1, &reg_val, 1) < 0) {
         return -LIS2DH12_ERROR_I2C;
     }
     reg_val &= ~(LIS2DH12_CTRL_REG1_ODR_MASK); 
-    reg_val |= (uint8_t)(dev->params.rate << LIS2DH12_CTRL_REG1_ODR_SHIFT);
+    reg_val |= (uint8_t)(dev->params.odr << LIS2DH12_CTRL_REG1_ODR_SHIFT);
     if (_lis2dh12_write_reg(dev, LIS2DH12_CTRL_REG1, &reg_val, 1) < 0) {
         return -LIS2DH12_ERROR_I2C;
     }
@@ -405,7 +403,7 @@ int lis2dh12_init(lis2dh12_t *dev, const lis2dh12_params_t *params)
     return LIS2DH12_OK;
 }
 
-int lis2dh12_read_xyz(lis2dh12_t *dev, lis2dh12_acc_t *acceleration) {
+int lis2dh12_read_xyz(lis2dh12_t *dev, lis2dh12_data_t *acceleration) {
     uint8_t axl_data_rdy;
     uint8_t axl_data_ovr;
     uint16_t tick = 0xFFFF;
@@ -444,7 +442,7 @@ int lis2dh12_read_xyz(lis2dh12_t *dev, lis2dh12_acc_t *acceleration) {
     } while(((axl_data_rdy & LIS2DH12_STATUS_REG_ZYXDA_MASK) != LIS2DH12_STATUS_REG_ZYXDA_MASK) && --tick);
 
     if (!tick) {
-        LOG_ERROR("[LIS2DH12] Timeout reading acceleration\n");
+        DEBUG("[LIS2DH12] Timeout reading acceleration\n");
         return -LIS2DH12_ERROR_NO_NEW_DATA;
     }
     return LIS2DH12_OK;
@@ -486,13 +484,13 @@ int lis2dh12_read_temp(lis2dh12_t *dev, int16_t *temperature_degC)
     } while(((temp_data_rdy & LIS2DH12_STATUS_REG_AUX_TDA_MASK) != LIS2DH12_STATUS_REG_AUX_TDA_MASK) && --tick);
 
     if (!tick) {
-        LOG_ERROR("[LIS2DH12] Timeout reading temperature\n");
+        DEBUG("[LIS2DH12] Timeout reading temperature\n");
          return -LIS2DH12_ERROR_NO_NEW_DATA;
     }
     return LIS2DH12_OK;
 }
 
-int lis2dh12_power_on(lis2dh12_t *dev) 
+int lis2dh12_poweron(lis2dh12_t *dev) 
 {
     /* Enable all axis */
     uint8_t reg_val = 0x00;
@@ -506,48 +504,49 @@ int lis2dh12_power_on(lis2dh12_t *dev)
     }
 
     /* Set Output Data Rate */
-    DEBUG("Set Output Data Rate [%d]\n", dev->params.rate);
+    DEBUG("Set Output Data Rate [%d]\n", dev->params.odr);
     reg_val = 0x00;
     if (_lis2dh12_read_reg(dev, LIS2DH12_CTRL_REG1, &reg_val, 1) < 0) {
         return -LIS2DH12_ERROR_I2C;
     }
     reg_val &= ~(LIS2DH12_CTRL_REG1_ODR_MASK); 
-    reg_val |= (uint8_t)(dev->params.rate << LIS2DH12_CTRL_REG1_ODR_SHIFT);
+    reg_val |= (uint8_t)(dev->params.odr << LIS2DH12_CTRL_REG1_ODR_SHIFT);
     if (_lis2dh12_write_reg(dev, LIS2DH12_CTRL_REG1, &reg_val, 1) < 0) {
         return -LIS2DH12_ERROR_I2C;
     }
 
-    if (dev->params.rate != LIS2DH12_RATE_POWER_DOWN) {
+    if (dev->params.odr != LIS2DH12_ODR_POWER_DOWN) {
         uint32_t power_on_delay_us;
         
         switch (dev->params.res) {
             case LIS2DH12_HR_12BIT: {
-                switch (dev->params.rate) {
-                    case LIS2DH12_RATE_10HZ:
+                switch (dev->params.odr) {
+                    case LIS2DH12_ODR_10HZ:
                         power_on_delay_us = 7000/10;
                         break;
-                    case LIS2DH12_RATE_25HZ:
+                    case LIS2DH12_ODR_25HZ:
                         power_on_delay_us = 7000/25;
                         break;
-                    case LIS2DH12_RATE_50HZ:
+                    case LIS2DH12_ODR_50HZ:
                         power_on_delay_us = 7000/50;
                         break;
-                    case LIS2DH12_RATE_100HZ:
+                    case LIS2DH12_ODR_100HZ:
                         power_on_delay_us = 7000/100;
                         break;
-                    case LIS2DH12_RATE_200HZ:
+                    case LIS2DH12_ODR_200HZ:
                         power_on_delay_us = 7000/200;
                         break;
-                    case LIS2DH12_RATE_400HZ:
+                    case LIS2DH12_ODR_400HZ:
                         power_on_delay_us = 7000/400;
                         break;
-                    case LIS2DH12_RATE_5376Hz:
+                    case LIS2DH12_ODR_5376Hz:
                         power_on_delay_us = 7000/1344;
                         break;
                     default:
                         power_on_delay_us = 7000;
                         break;
                 }
+                break;
             }
             case LIS2DH12_NM_10BIT:
                 power_on_delay_us = 1600;
@@ -571,7 +570,7 @@ int lis2dh12_power_on(lis2dh12_t *dev)
     return LIS2DH12_OK;
 }
 
-int lis2dh12_power_off(lis2dh12_t *dev)
+int lis2dh12_poweroff(lis2dh12_t *dev)
 {
     /* Disable all axis */
     uint8_t reg_val = 0x00;
@@ -590,7 +589,7 @@ int lis2dh12_power_off(lis2dh12_t *dev)
         return -LIS2DH12_ERROR_I2C;
     }
     reg_val &= ~(LIS2DH12_CTRL_REG1_ODR_MASK); 
-    reg_val |= (uint8_t)(LIS2DH12_RATE_POWER_DOWN << LIS2DH12_CTRL_REG1_ODR_SHIFT);
+    reg_val |= (uint8_t)(LIS2DH12_ODR_POWER_DOWN << LIS2DH12_CTRL_REG1_ODR_SHIFT);
     if (_lis2dh12_write_reg(dev, LIS2DH12_CTRL_REG1, &reg_val, 1) < 0) {
         return -LIS2DH12_ERROR_I2C;
     }

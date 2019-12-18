@@ -32,6 +32,8 @@
 #include "sx127x_registers.h"
 #include "sx127x_internal.h"
 
+#include "xtimer.h"
+
 #define ENABLE_DEBUG (0)
 #include "debug.h"
 
@@ -88,7 +90,11 @@ void sx127x_set_modem(sx127x_t *dev, uint8_t modem)
 
     switch (dev->settings.modem) {
         case SX127X_MODEM_FSK:
-            /* Todo */
+            sx127x_set_op_mode(dev, SX127X_RF_OPMODE_SLEEP);
+            sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                             (sx127x_reg_read(dev, SX127X_REG_OPMODE) &
+                              SX127X_RF_LORA_OPMODE_LONGRANGEMODE_MASK) |
+                             SX127X_RF_LORA_OPMODE_LONGRANGEMODE_OFF);
             break;
         case SX127X_MODEM_LORA:
             sx127x_set_op_mode(dev, SX127X_RF_OPMODE_SLEEP);
@@ -96,9 +102,6 @@ void sx127x_set_modem(sx127x_t *dev, uint8_t modem)
                              (sx127x_reg_read(dev, SX127X_REG_OPMODE) &
                               SX127X_RF_LORA_OPMODE_LONGRANGEMODE_MASK) |
                              SX127X_RF_LORA_OPMODE_LONGRANGEMODE_ON);
-
-            sx127x_reg_write(dev, SX127X_REG_DIOMAPPING1, 0x00);
-            sx127x_reg_write(dev, SX127X_REG_DIOMAPPING2, 0x00);
             break;
         default:
             break;
@@ -119,9 +122,11 @@ void sx127x_set_syncword(sx127x_t *dev, uint8_t syncword)
 
 uint32_t sx127x_get_channel(const sx127x_t *dev)
 {
-    return (((uint32_t)sx127x_reg_read(dev, SX127X_REG_FRFMSB) << 16) |
-            (sx127x_reg_read(dev, SX127X_REG_FRFMID) << 8) |
-            (sx127x_reg_read(dev, SX127X_REG_FRFLSB))) * LORA_FREQUENCY_RESOLUTION_DEFAULT;
+    uint64_t channel = (sx127x_reg_read(dev, SX127X_REG_FRFMSB) << 16) |
+                       (sx127x_reg_read(dev, SX127X_REG_FRFMID) << 8)  |
+                        sx127x_reg_read(dev, SX127X_REG_FRFLSB);
+
+    return (uint32_t)((channel * LORA_FREQUENCY_RESOLUTION_DEFAULT)/1000000ULL);
 }
 
 void sx127x_set_channel(sx127x_t *dev, uint32_t channel)
@@ -131,7 +136,20 @@ void sx127x_set_channel(sx127x_t *dev, uint32_t channel)
     /* Save current operating mode */
     dev->settings.channel = channel;
 
-    channel = (uint32_t)((double) channel / (double)LORA_FREQUENCY_RESOLUTION_DEFAULT);
+    /* SX1276 only: choose frequency band */
+    if (dev->_internal.modem_chip == SX127X_MODEM_SX1276) {
+        uint8_t reg_opmode = sx127x_reg_read(dev, SX127X_REG_OPMODE);
+
+        if (channel >= 779000000) {
+            sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                             reg_opmode & ~SX127X_RF_OPMODE_LOWFREQMODE_ON);
+        } else {
+            sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                             reg_opmode | SX127X_RF_OPMODE_LOWFREQMODE_ON);
+        }
+    }
+
+    channel = (1000000ULL*(uint64_t)channel) / LORA_FREQUENCY_RESOLUTION_DEFAULT;
 
     /* Write frequency settings into chip */
     sx127x_reg_write(dev, SX127X_REG_FRFMSB, (uint8_t)((channel >> 16) & 0xFF));
@@ -305,7 +323,7 @@ void sx127x_set_rx(sx127x_t *dev)
                                  (sx127x_reg_read(dev, SX127X_REG_DIOMAPPING1) &
                                   SX127X_RF_LORA_DIOMAPPING1_DIO0_MASK) |
                                   SX127X_RF_LORA_DIOMAPPING1_DIO0_00);
-                                 
+
                 /* DIO3=ValidHeader */
                 sx127x_reg_write(dev, SX127X_REG_DIOMAPPING1,
                                  (sx127x_reg_read(dev, SX127X_REG_DIOMAPPING1) &
@@ -458,14 +476,14 @@ void sx127x_set_op_mode(const sx127x_t *dev, uint8_t op_mode)
         gpio_irq_disable(dev->params.dio1_pin);
         gpio_irq_disable(dev->params.dio2_pin);
         gpio_irq_disable(dev->params.dio3_pin);
-        
+
         /* disable RF switch power */
         if (dev->params.rfswitch_active_level) {
             gpio_clear(dev->params.rfswitch_pin);
         } else {
             gpio_set(dev->params.rfswitch_pin);
         }
-        
+
         /* switch CPU to low-power mode */
         /* pm_set(LPM_IDLE); */
 	} else {
@@ -473,7 +491,7 @@ void sx127x_set_op_mode(const sx127x_t *dev, uint8_t op_mode)
         gpio_irq_enable(dev->params.dio1_pin);
         gpio_irq_enable(dev->params.dio2_pin);
         gpio_irq_enable(dev->params.dio3_pin);
-        
+
         /* enable RF switch power */
         if (dev->params.rfswitch_active_level) {
             gpio_set(dev->params.rfswitch_pin);
@@ -482,9 +500,15 @@ void sx127x_set_op_mode(const sx127x_t *dev, uint8_t op_mode)
         }
     }
 
+    uint8_t prev_op_mode = sx127x_reg_read(dev, SX127X_REG_OPMODE);
+
     /* Replace previous mode value and setup new mode value */
-    sx127x_reg_write(dev, SX127X_REG_OPMODE,
-                     (sx127x_reg_read(dev, SX127X_REG_OPMODE) & SX127X_RF_OPMODE_MASK) | op_mode);
+    sx127x_reg_write(dev, SX127X_REG_OPMODE, (prev_op_mode & SX127X_RF_OPMODE_MASK) | op_mode);
+
+    /* wait for crystal oscillator to start when going from sleep to standby */
+    if ((op_mode == SX127X_RF_OPMODE_STANDBY) && ((prev_op_mode & ~SX127X_RF_OPMODE_MASK) == SX127X_RF_OPMODE_SLEEP)) {
+        xtimer_spin(xtimer_ticks_from_usec(250));
+    }
 }
 
 uint8_t sx127x_get_bandwidth(const sx127x_t *dev)
@@ -562,18 +586,18 @@ static inline void _lna_agc_enable(const sx127x_t *dev) {
                     (sx127x_reg_read(dev, SX127X_REG_LR_LNA) &
                     SX127X_RF_LORA_LNA_BOOST_HF_MASK) |
                     SX127X_RF_LORA_LNA_BOOST_HF_ON);
-    
+
     /* Enable Automatic Gain Control */
     if (dev->_internal.modem_chip == SX127X_MODEM_SX1272) {
         sx127x_reg_write(dev, SX127X_REG_LR_MODEMCONFIG2,
                         (sx127x_reg_read(dev, SX127X_REG_LR_MODEMCONFIG2) &
-                         SX127X_RF_LORA_MODEMCONFIG3_AGCAUTO_MASK) | 
+                         SX127X_RF_LORA_MODEMCONFIG3_AGCAUTO_MASK) |
                          SX127X_RF_LORA_MODEMCONFIG3_AGCAUTO_ON);
     } else {
         /* SX1276 */
         sx127x_reg_write(dev, SX127X_REG_LR_MODEMCONFIG3,
                         (sx127x_reg_read(dev, SX127X_REG_LR_MODEMCONFIG3) &
-                         SX127X_RF_LORA_MODEMCONFIG3_AGCAUTO_MASK) | 
+                         SX127X_RF_LORA_MODEMCONFIG3_AGCAUTO_MASK) |
                          SX127X_RF_LORA_MODEMCONFIG3_AGCAUTO_ON);
     }
 }
@@ -587,7 +611,7 @@ void sx127x_set_bandwidth(sx127x_t *dev, uint8_t bandwidth)
     _update_bandwidth((const sx127x_t *)dev);
 
     _low_datarate_optimize(dev);
-    
+
     _lna_agc_enable((const sx127x_t *)dev);
 
     /* ERRATA sensitivity tweaks */
@@ -756,7 +780,7 @@ void sx127x_set_fixed_header_len_mode(sx127x_t *dev, bool fixed_len)
     _set_flag(dev, SX127X_ENABLE_FIXED_HEADER_LENGTH_FLAG, fixed_len);
 
     uint8_t config1_reg = sx127x_reg_read(dev, SX127X_REG_LR_MODEMCONFIG1);
-    
+
     if (dev->_internal.modem_chip == SX127X_MODEM_SX1272) {
         config1_reg &= SX1272_RF_LORA_MODEMCONFIG1_IMPLICITHEADER_MASK;
         config1_reg |= fixed_len << 2;
@@ -800,7 +824,7 @@ void sx127x_set_tx_power(sx127x_t *dev, int8_t power)
     dev->settings.lora.power = power;
 
     uint8_t pa_config = sx127x_reg_read(dev, SX127X_REG_PACONFIG);
-    
+
     uint32_t reg;
     if (dev->_internal.modem_chip == SX127X_MODEM_SX1272) {
         reg = SX1272_REG_PADAC;
@@ -862,7 +886,7 @@ void sx127x_set_tx_power(sx127x_t *dev, int8_t power)
     }
 
     sx127x_reg_write(dev, SX127X_REG_PACONFIG, pa_config);
-    
+
     if (dev->_internal.modem_chip == SX127X_MODEM_SX1272) {
         reg = SX1272_REG_PADAC;
     } else {

@@ -38,7 +38,6 @@
 #define ENABLE_DEBUG (1)
 #include "debug.h"
 
-
 #define SX127X_SPI_SPEED    (SPI_CLK_1MHZ)
 #define SX127X_SPI_MODE     (SPI_MODE_0)
 
@@ -46,7 +45,7 @@ int sx127x_check_version(sx127x_t *dev)
 {
     /* Read version number and compare with sx127x assigned revision */
     uint8_t version = sx127x_reg_read(dev, SX127X_REG_VERSION);
-    
+
     switch (version) {
         case VERSION_SX1272:
             dev->_internal.modem_chip = SX127X_MODEM_SX1272;
@@ -112,45 +111,88 @@ void sx127x_read_fifo(const sx127x_t *dev, uint8_t *buffer, uint8_t size)
     sx127x_reg_read_burst(dev, 0, buffer, size);
 }
 
-void sx1276_rx_chain_calibration(sx127x_t *dev)
+void sx127x_rx_chain_calibration(sx127x_t *dev)
 {
-    uint8_t reg_pa_config_init_val;
-    uint32_t initial_freq;
+    /* Save transciever operation mode */
+    uint8_t reg_opmode = sx127x_reg_read(dev, SX127X_REG_OPMODE);
 
-    /* Save context */
-    reg_pa_config_init_val = sx127x_reg_read(dev, SX127X_REG_PACONFIG);
-    initial_freq = (double) (((uint32_t) sx127x_reg_read(dev, SX127X_REG_FRFMSB) << 16)
-                             | ((uint32_t) sx127x_reg_read(dev, SX127X_REG_FRFMID) << 8)
-                             | ((uint32_t) sx127x_reg_read(dev, SX127X_REG_FRFLSB))) * (double)LORA_FREQUENCY_RESOLUTION_DEFAULT;
+    /* Switch to FSK mode if needed */
+    uint8_t mode = reg_opmode & ~SX127X_RF_LORA_OPMODE_LONGRANGEMODE_MASK;
+    if (mode == SX127X_RF_LORA_OPMODE_LONGRANGEMODE_ON) {
+        /* Set opmode to SLEEP */
+        sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                     (reg_opmode & SX127X_RF_OPMODE_MASK) | SX127X_RF_OPMODE_SLEEP);
 
-    /* Cut the PA just in case, RFO output, power = -1 dBm */
-    sx127x_reg_write(dev, SX127X_REG_PACONFIG, 0x00);
-
-    /* Launch Rx chain calibration for LF band */
-    sx127x_reg_write(dev,
-                     SX127X_REG_IMAGECAL,
-                     (sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_IMAGECAL_MASK)
-                     | SX127X_RF_IMAGECAL_IMAGECAL_START);
-
-    while ((sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_IMAGECAL_RUNNING)
-           == SX127X_RF_IMAGECAL_IMAGECAL_RUNNING) {
+        /* Switch to FSK */
+        sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                        (reg_opmode &
+                         SX127X_RF_LORA_OPMODE_LONGRANGEMODE_MASK) |
+                         SX127X_RF_LORA_OPMODE_LONGRANGEMODE_OFF);
     }
 
-    /* Set a frequency in HF band */
-    sx127x_set_channel(dev, SX127X_HF_CHANNEL_DEFAULT);
+    /* Switch to STANDBY mode */
+    sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                     (reg_opmode & SX127X_RF_OPMODE_MASK) | SX127X_RF_OPMODE_STANDBY);
 
-    /* Launch Rx chain calibration for HF band */
+    /* Wait for oscillator startup, TS_OSC = 250 us (datasheet table 7) */
+    xtimer_spin(xtimer_ticks_from_usec(250));
+
+    /* Switch to FSRX mode, PLL lock is not required */
+    sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                     (reg_opmode & SX127X_RF_OPMODE_MASK) | SX127X_RF_LORA_OPMODE_SYNTHESIZER_RX);
+
+    /* Enable temperature monitoring */
     sx127x_reg_write(dev,
                      SX127X_REG_IMAGECAL,
-                     (sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_IMAGECAL_MASK)
-                     | SX127X_RF_IMAGECAL_IMAGECAL_START);
-    while ((sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_IMAGECAL_RUNNING)
-           == SX127X_RF_IMAGECAL_IMAGECAL_RUNNING) {
+                     (sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_TEMPMONITOR_MASK)
+                     | SX127X_RF_IMAGECAL_TEMPMONITOR_ON);
+
+    /* Wait 150 us */
+    xtimer_spin(xtimer_ticks_from_usec(150));
+
+    /* Disable temperature monitoring */
+    sx127x_reg_write(dev,
+                     SX127X_REG_IMAGECAL,
+                     (sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_TEMPMONITOR_MASK)
+                     | SX127X_RF_IMAGECAL_TEMPMONITOR_OFF);
+
+    /* Recalibrate if temperature drift > 10C */
+    if ((sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_TEMPCHANGE_HIGHER) == SX127X_RF_IMAGECAL_TEMPCHANGE_HIGHER) {
+        /* Back to STANDBY mode */
+        sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                         (reg_opmode & SX127X_RF_OPMODE_MASK) | SX127X_RF_OPMODE_STANDBY);
+
+        /* Launch Rx chain calibration */
+        sx127x_reg_write(dev,
+                         SX127X_REG_IMAGECAL,
+                         (sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_IMAGECAL_MASK)
+                         | SX127X_RF_IMAGECAL_IMAGECAL_START);
+
+        /* Wait for calibration to finish */
+        while ((sx127x_reg_read(dev, SX127X_REG_IMAGECAL) & SX127X_RF_IMAGECAL_IMAGECAL_RUNNING)
+               == SX127X_RF_IMAGECAL_IMAGECAL_RUNNING) { }
     }
 
-    /* Restore context */
-    sx127x_reg_write(dev, SX127X_REG_PACONFIG, reg_pa_config_init_val);
-    sx127x_set_channel(dev, initial_freq);
+    /* Restore LoRa mode if needed */
+    if (mode == SX127X_RF_LORA_OPMODE_LONGRANGEMODE_ON) {
+        /* Set opmode to SLEEP */
+        sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                     (reg_opmode & SX127X_RF_OPMODE_MASK) | SX127X_RF_OPMODE_SLEEP);
+
+        /* Switch to LoRa */
+        sx127x_reg_write(dev, SX127X_REG_OPMODE,
+                        (reg_opmode &
+                         SX127X_RF_LORA_OPMODE_LONGRANGEMODE_MASK) |
+                         SX127X_RF_LORA_OPMODE_LONGRANGEMODE_ON);
+    }
+
+    /* Restore transciever operation mode */
+    sx127x_reg_write(dev, SX127X_REG_OPMODE, reg_opmode);
+
+    /* If opmode to restore is not SLEEP, wait for crystal */
+    if ((reg_opmode & ~SX127X_RF_OPMODE_MASK) != SX127X_RF_OPMODE_SLEEP) {
+        xtimer_spin(xtimer_ticks_from_usec(250));
+    }
 }
 
 int16_t sx127x_read_rssi(const sx127x_t *dev)
@@ -164,7 +206,7 @@ int16_t sx127x_read_rssi(const sx127x_t *dev)
         case SX127X_MODEM_LORA:
             if (dev->_internal.modem_chip == SX127X_MODEM_SX1272) {
                 rssi = SX127X_RSSI_OFFSET + sx127x_reg_read(dev, SX127X_REG_LR_RSSIVALUE);
-            } else {                
+            } else {
                 if (dev->settings.channel > SX127X_RF_MID_BAND_THRESH) {
                     rssi = SX127X_RSSI_OFFSET_HF + sx127x_reg_read(dev, SX127X_REG_LR_RSSIVALUE);
                 }
@@ -205,7 +247,7 @@ void sx127x_start_cad(sx127x_t *dev)
                              (sx127x_reg_read(dev, SX127X_REG_DIOMAPPING1) &
                              SX127X_RF_LORA_DIOMAPPING1_DIO3_MASK) |
                              SX127X_RF_LORA_DIOMAPPING1_DIO3_00);
-                             
+
             sx127x_set_state(dev,  SX127X_RF_CAD);
             sx127x_set_op_mode(dev, SX127X_RF_LORA_OPMODE_CAD);
             break;
@@ -266,7 +308,7 @@ bool sx127x_is_channel_free(sx127x_t *dev, uint32_t freq, int16_t rssi_threshold
 
     /* using  LoRa CAD */
     int delay_ms = 5 + ((100 + 10*dev->settings.lora.datarate) >> dev->settings.lora.datarate);
-    
+
     for (int k = 0; k < 10; k++) {
         sx127x_cad_result = SX127X_CAD_RUNNING;
 

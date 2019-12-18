@@ -1,12 +1,16 @@
-# name of your application
+# name of the application
 APPLICATION = lorawan
 
 # application-specific modules
-USEPKG += semtech-loramac
+USEMODULE += gnrc_netdev_default
+USEMODULE += gnrc_lorawan
+USEMODULE += gnrc_netapi_callbacks
 
+# needed by unwds-common
 CFLAGS += -DUNWDS_MAC_LORAWAN
 
-# to be removed later
-# CFLAGS += -DLORAWAN_DONT_USE_FPORT
+# GNRC LoRaWAN packet buffer size
+CFLAGS += -DGNRC_PKTBUF_SIZE=512
 
+# other application settings here:
 include ../unwds-common/Makefile.include

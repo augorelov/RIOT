@@ -81,6 +81,8 @@ extern "C" {
 
 #define LORAWAN_SENDNEXT_DELAY_MS   10000U
 #define LORAWAN_MIN_TX_DELAY_MS     5000U
+#define LORAWAN_GNRC_TIMEOUT_MS     20000U
+#define LORAWAN_GNRC_TIMEOUT_ERROR  111U
 
 #define LORAWAN_PORT_DEFAULT    2
 
@@ -225,12 +227,13 @@ static void ls_setup(gnrc_netif_t *ls)
         puts("[LoRa] Unable to set DevAddr");
     }
 
-    /* disable ADR by default, to be enable on per-packet basis */
+    /* set ADR mode */
     netopt_enable_t adr = (unwds_get_node_settings().adr)? NETOPT_ENABLE:NETOPT_DISABLE;
     if (gnrc_netapi_set(interface, NETOPT_LORAWAN_ADR, 0, (void *)&adr, sizeof(netopt_enable_t)) < 0) {
         puts("[LoRa] Unable to set ADR");
     }
 
+    /* set initial datarate */
     uint8_t dr = unwds_get_node_settings().dr;
     if (gnrc_netapi_set(interface, NETOPT_LORAWAN_DR, 0, (void *)&dr, sizeof(dr)) < 0) {
         puts("[LoRa] Unable to set Data Rate");
@@ -239,25 +242,31 @@ static void ls_setup(gnrc_netif_t *ls)
         puts("[LoRa] Unable to set RX2 Data Rate");
     }
 
+    /* set initial transmit power */
     uint8_t tx_power = 0; /* 0 for maximum power */
     if (gnrc_netapi_set(interface, NETOPT_LORAWAN_TX_POWER, 0, (void *)&tx_power, sizeof(tx_power)) < 0) {
         puts("[LoRa] Unable to set TX power");
     }
 
-    /*
-    semtech_loramac_set_class(ls, unwds_get_node_settings().nodeclass);
-    */
+    /* set device class */
+    loramac_class_t class = (loramac_class_t)unwds_get_node_settings().nodeclass;
+    if (gnrc_netapi_set(interface, NETOPT_LORAWAN_DEVICE_CLASS, 0, (void *)&class, sizeof(loramac_class_t)) < 0) {
+        puts("[LoRa] Unable to set ACK");
+    }
 
+    /* set device activation mode */
     netopt_enable_t otaa = (unwds_get_node_settings().no_join)? (NETOPT_DISABLE):(NETOPT_ENABLE);
     if (gnrc_netapi_set(interface, NETOPT_OTAA, 0, (void *)&otaa, sizeof(netopt_enable_t)) < 0) {
         puts("[LoRa] Unable to set ACK");
     }
 
+    /* set uplink confirmation mode */
     netopt_enable_t ack = (unwds_get_node_settings().confirmation)? (NETOPT_ENABLE):(NETOPT_DISABLE);
     if (gnrc_netapi_set(interface, NETOPT_ACK_REQ, 0, (void *)&ack, sizeof(netopt_enable_t)) < 0) {
         puts("[LoRa] Unable to set ACK");
     }
 
+    /* set default LoRaWAN uplink FPort */
     uint8_t port = 2; /* default TX port */
     if (gnrc_netapi_set(interface, NETOPT_LORAWAN_TX_PORT, 0, (void *)&port, sizeof(port)) < 0) {
         puts("[LoRa] Unable to set TX port");
@@ -295,7 +304,7 @@ static void *sender_thread(void *arg) {
 
         if ((last_tx_time < now) && (last_tx_time + LORAWAN_MIN_TX_DELAY_MS > now)) {
             tx_delay = last_tx_time + LORAWAN_MIN_TX_DELAY_MS - now;
-            printf("[LoRa] TX delayed by %lu ms\n", tx_delay);
+            printf("[LoRa] TX delayed by %" PRIu32 " ms\n", tx_delay);
             lptimer_sleep(tx_delay);
         }
 
@@ -362,9 +371,9 @@ static void *sender_thread(void *arg) {
 
             msg_t _timeout_msg;
             _timeout_msg.type = GNRC_NETERR_MSG_TYPE;
-            _timeout_msg.content.value = 111; /* Some error */
+            _timeout_msg.content.value = LORAWAN_GNRC_TIMEOUT_ERROR; /* Some error */
             lptimer_t _timeout_timer;
-            lptimer_set_msg(&_timeout_timer, 10000, &_timeout_msg, sender_pid);
+            lptimer_set_msg(&_timeout_timer, LORAWAN_GNRC_TIMEOUT_MS, &_timeout_msg, sender_pid);
 
             /* wait for packet status and check */
             msg_t msg;
@@ -374,7 +383,7 @@ static void *sender_thread(void *arg) {
 
             lptimer_remove(&_timeout_timer);
 
-            if (msg.content.value == 111) {
+            if (msg.content.value == LORAWAN_GNRC_TIMEOUT_ERROR) {
                 puts("[LoRa] GNRC timeout");
             }
 
@@ -464,16 +473,16 @@ static void *sender_thread(void *arg) {
 
             msg_t _timeout_msg;
             _timeout_msg.type = GNRC_NETERR_MSG_TYPE;
-            _timeout_msg.content.value = 111; /* Some error */
+            _timeout_msg.content.value = LORAWAN_GNRC_TIMEOUT_ERROR; /* Some error */
             lptimer_t _timeout_timer;
-            lptimer_set_msg(&_timeout_timer, 10000, &_timeout_msg, sender_pid);
+            lptimer_set_msg(&_timeout_timer, LORAWAN_GNRC_TIMEOUT_MS, &_timeout_msg, sender_pid);
 
             msg_t msg;
             do {
                 msg_receive(&msg);
             } while (msg.type != GNRC_NETERR_MSG_TYPE);
 
-            if (msg.content.value == 111) {
+            if (msg.content.value == LORAWAN_GNRC_TIMEOUT_ERROR) {
                 puts("[LoRa] GNRC timeout");
             }
 
@@ -489,14 +498,10 @@ static void *sender_thread(void *arg) {
 
                 /* move packets from backwaters back to uplink */
                 if (!ls_frame_fifo_empty(&fifo_backwater)) {
-                    if (ls_frame_fifo_full(&fifo_uplink_queue)) {
-                        /* uplink already filled full with new packets */
-                        ls_frame_fifo_clear(&fifo_backwater);
-                    } else {
-                        /* move backwaters to uplink queue */
-                        memcpy((void *)&fifo_uplink_queue, (void *)&fifo_backwater, sizeof(ls_frame_fifo_t));
-                        ls_frame_fifo_clear(&fifo_backwater);
-                    }
+                    memcpy((void *)&fifo_uplink_queue, (void *)&fifo_backwater, sizeof(ls_frame_fifo_t));
+                    ls_frame_fifo_clear(&fifo_backwater);
+
+                    msg_send(&msg_data, sender_pid);
                 }
 
                 /* transmitting initial packet with module data for Class C devices */
